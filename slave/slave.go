@@ -5,12 +5,16 @@ Uses a MQTT device as a game console and plays against master (Http Rest-API)
 
 */
 
-package main
+package slave
 
 import (
+	"bytes"
+	"encoding/json"
 	"flag"
 	"fmt"
+	"io/ioutil"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
@@ -55,6 +59,8 @@ func down(sym symbol) symbol {
 }
 
 var boardID string
+var masterAddress string
+var gameURL string
 var mqttClient mqtt.Client
 var logger log.Logger
 var displayContent [4]string
@@ -130,25 +136,47 @@ func symbolSelectionHandler(client mqtt.Client, msg mqtt.Message) {
 	}
 }
 
+func postJSON(url string, json []byte) []byte {
+	req, err := http.NewRequest("POST", masterAddress+url, bytes.NewBuffer(json))
+	if err != nil {
+		panic(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		panic(err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 && resp.StatusCode != 201 {
+		panic("Invalid POST response status " + resp.Status)
+	}
+	body, _ := ioutil.ReadAll(resp.Body)
+	return body
+}
+
 func playButtonHandler(client mqtt.Client, msg mqtt.Message) {
 	payload := string(msg.Payload())
 	if payload == "ON" {
 		log.Printf("PlayButton Pressed\n")
-	} else {
+	} else if payload == "OFF" {
 		log.Printf("PlayButton Released\n")
-		// POST symbol to master
 	}
 }
 
-func main() {
+// Start the slave
+func Start() {
 
 	boardIDPtr := flag.String("id", "b03", "Board-ID")
-	//masterHostAddressPtr := flag.String("masterip", "192.168.201.?", "Master Address")
+	masterHostAddressPtr := flag.String("masterip", "192.168.201.99:8080", "Master Address")
 	brokerHostAddressPtr := flag.String("brokerip", "192.168.201.99:1883", "Broker Address")
 	flag.Parse()
 
 	boardID = *boardIDPtr
 	brokerAddress := fmt.Sprintf("tcp://%s", *brokerHostAddressPtr)
+	masterAddress = fmt.Sprintf("http://%s", *masterHostAddressPtr)
 
 	status.currentSymbol = rock
 
@@ -198,6 +226,17 @@ func main() {
 		log.Println("cleaned up")
 		os.Exit(1)
 	}()
+
+	log.Printf("register Slave %s on master %s", boardID, masterAddress)
+	var game Game
+	game.BoardID = boardID
+
+	encodedGame, err := json.Marshal(&game)
+	if err != nil {
+		panic(err)
+	}
+	gameURL = string(postJSON("/registry", encodedGame))
+	log.Printf("Use gameURL %s", gameURL)
 
 	fmt.Println("Press Ctrl-C to stop")
 	for {
