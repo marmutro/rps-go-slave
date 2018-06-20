@@ -4,18 +4,18 @@ package slave
 type Symbol int
 
 const (
-	Rock    Symbol = iota
-	Paper          = iota
-	Scissor        = iota
+	Rock     Symbol = iota
+	Paper           = iota
+	Scissors        = iota
 )
 
 func (sym Symbol) String() string {
 	names := [...]string{
 		"Rock",
 		"Paper",
-		"Scissor"}
+		"Scissors"}
 
-	if sym < Rock || sym > Scissor {
+	if sym < Rock || sym > Scissors {
 		return "Out-of-range"
 	}
 	return names[sym]
@@ -25,7 +25,7 @@ func FromString(sym string) Symbol {
 	names := [...]string{
 		"Rock",
 		"Paper",
-		"Scissor"}
+		"Scissors"}
 
 	i := 0
 	for _, name := range names {
@@ -38,7 +38,7 @@ func FromString(sym string) Symbol {
 }
 
 func Up(sym Symbol) Symbol {
-	if sym < Scissor {
+	if sym < Scissors {
 		return sym + 1
 	}
 	return Rock
@@ -48,5 +48,5 @@ func Down(sym Symbol) Symbol {
 	if sym > Rock {
 		return sym - 1
 	}
-	return Scissor
+	return Scissors
 }
