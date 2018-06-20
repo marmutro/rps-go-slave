@@ -25,78 +25,6 @@ import (
 	"github.com/eclipse/paho.mqtt.golang"
 )
 
-type (
-	symbol int
-
-	// Logger interface allows implementations to provide to this package any
-	// object that implements the methods defined in it.
-	Logger interface {
-		Println(v ...interface{})
-		Printf(format string, v ...interface{})
-	}
-
-	// NOOPLogger implements the logger that does not perform any operation
-	// by default. This allows us to efficiently discard the unwanted messages.
-	NOOPLogger struct{}
-)
-
-func (NOOPLogger) Println(v ...interface{})               {}
-func (NOOPLogger) Printf(format string, v ...interface{}) {}
-
-// Internal levels of library output that are initialised to not print
-// anything but can be overridden by programmer
-var (
-	DEBUG Logger = NOOPLogger{}
-)
-
-const (
-	rock    symbol = iota
-	paper          = iota
-	scissor        = iota
-)
-
-func (sym symbol) String() string {
-	names := [...]string{
-		"Rock",
-		"Paper",
-		"Scissor"}
-
-	if sym < rock || sym > scissor {
-		return "Out-of-range"
-	}
-	return names[sym]
-}
-
-func fromString(sym string) symbol {
-	names := [...]string{
-		"Rock",
-		"Paper",
-		"Scissor"}
-
-	i := 0
-	for _, name := range names {
-		if name == sym {
-			return symbol(i)
-		}
-		i++
-	}
-	panic(sym + " not found")
-}
-
-func up(sym symbol) symbol {
-	if sym < scissor {
-		return sym + 1
-	}
-	return rock
-}
-
-func down(sym symbol) symbol {
-	if sym > rock {
-		return sym - 1
-	}
-	return scissor
-}
-
 var boardID string
 var masterAddress string
 var gameURL string
@@ -105,10 +33,11 @@ var logger log.Logger
 var displayContent [4]string
 
 type gameStatus struct {
+	initialized     bool
 	encoderValue    int
 	playButtonState bool
-	currentSymbol   symbol
-	oppenentSymbol  symbol
+	currentSymbol   Symbol
+	oppenentSymbol  Symbol
 	ownScore        int
 	opponentScore   int
 }
@@ -138,16 +67,23 @@ func postJSON(baseURL string, url string, json []byte) []byte {
 
 func updateDisplay() {
 	message := fmt.Sprintf("%s\n%s\n%s\n%s", displayContent[0], displayContent[1], displayContent[2], displayContent[3])
-	fmt.Println(message)
+	DEBUG.Println(message)
 	token := mqttClient.Publish(messageTopic(), 0, false, message)
 	token.Wait()
 }
 
 func showGameState() {
-	displayContent[0] = status.currentSymbol.String()
-	displayContent[1] = status.oppenentSymbol.String()
-	displayContent[2] = fmt.Sprintf("Own:      %d", status.ownScore)
-	displayContent[3] = fmt.Sprintf("Opponent: %d", status.opponentScore)
+	if status.initialized == false {
+		displayContent[0] = "Initializing..."
+		displayContent[1] = ""
+		displayContent[2] = ""
+		displayContent[3] = ""
+	} else {
+		displayContent[0] = status.currentSymbol.String()
+		displayContent[1] = status.oppenentSymbol.String()
+		displayContent[2] = fmt.Sprintf("Own:      %d", status.ownScore)
+		displayContent[3] = fmt.Sprintf("Opponent: %d", status.opponentScore)
+	}
 	updateDisplay()
 }
 
@@ -184,16 +120,17 @@ func symbolSelectionHandler(client mqtt.Client, msg mqtt.Message) {
 	payload := string(msg.Payload())
 	i, err := strconv.Atoi(payload)
 	if err == nil {
-		if i > status.encoderValue {
-			status.currentSymbol = up(status.currentSymbol)
+		if status.initialized {
+			if i > status.encoderValue {
+				status.currentSymbol = Up(status.currentSymbol)
+			}
+			if i < status.encoderValue {
+				status.currentSymbol = Down(status.currentSymbol)
+			}
+			status.encoderValue = i
+			DEBUG.Printf("Symbol=%s\n", status.currentSymbol)
+			showGameState()
 		}
-		if i < status.encoderValue {
-			status.currentSymbol = down(status.currentSymbol)
-		}
-		status.encoderValue = i
-		DEBUG.Printf("Symbol=%s\n", status.currentSymbol)
-		showGameState()
-
 	} else {
 		log.Printf("Err=%s Payload=%s\n", err, msg.Payload())
 	}
@@ -205,8 +142,8 @@ func playButtonHandler(client mqtt.Client, msg mqtt.Message) {
 		DEBUG.Printf("PlayButton Pressed\n")
 		status.playButtonState = true
 	} else if payload == "OFF" {
-		DEBUG.Printf("PlayButton Released\n")
-		if status.playButtonState {
+		if status.playButtonState && status.initialized == true {
+			DEBUG.Printf("PlayButton Released\n")
 			var slaveSymbol GameSymbol
 			slaveSymbol.Symbol = status.currentSymbol.String()
 			encodedSymbol, err := json.Marshal(&slaveSymbol)
@@ -222,10 +159,10 @@ func playButtonHandler(client mqtt.Client, msg mqtt.Message) {
 			DEBUG.Printf("gameResult=%s", string(body))
 			status.ownScore = gameResult.SlaveScore
 			status.opponentScore = gameResult.MasterScore
-			status.oppenentSymbol = fromString(gameResult.GameHistory[len(gameResult.GameHistory)-1].MasterSymbol)
+			status.oppenentSymbol = FromString(gameResult.GameHistory[len(gameResult.GameHistory)-1].MasterSymbol)
 			showGameState()
-			status.playButtonState = false
 		}
+		status.playButtonState = false
 	}
 }
 
@@ -235,15 +172,16 @@ func Start() {
 	boardIDPtr := flag.String("id", "b03", "Board-ID")
 	masterHostAddressPtr := flag.String("masterip", "192.168.201.99:8080", "Master Address")
 	brokerHostAddressPtr := flag.String("brokerip", "192.168.201.99:1883", "Broker Address")
+	verbosePtr := flag.Bool("v", false, "Enable logging output")
 	flag.Parse()
 
 	boardID = *boardIDPtr
 	brokerAddress := fmt.Sprintf("tcp://%s", *brokerHostAddressPtr)
 	masterAddress = fmt.Sprintf("http://%s", *masterHostAddressPtr)
 
-	status.currentSymbol = rock
-
-	//DEBUG = log.New(os.Stdout, "[slave] ", 0)
+	if *verbosePtr == true {
+		DEBUG = log.New(os.Stdout, "[slave] ", 0)
+	}
 	//mqtt.DEBUG = log.New(os.Stdout, "[mqtt] ", 0)
 	mqtt.ERROR = log.New(os.Stdout, "[mqtt] ", 0)
 	opts := mqtt.NewClientOptions().AddBroker(brokerAddress).SetClientID("gotrivial")
@@ -259,6 +197,22 @@ func Start() {
 	// select message display 4
 	token := mqttClient.Publish(displaySelectTopic(), 0, false, "4")
 	token.Wait()
+
+	showGameState()
+
+	DEBUG.Printf("register Slave %s on master %s", boardID, masterAddress)
+	var game Game
+	game.BoardID = boardID
+
+	encodedGame, err := json.Marshal(&game)
+	if err != nil {
+		panic(err)
+	}
+	gameURL = string(postJSON(masterAddress, "/registry", encodedGame))
+	if !strings.HasPrefix(gameURL, "http://") {
+		gameURL = "http://" + gameURL
+	}
+	DEBUG.Printf("Use gameURL %s", gameURL)
 
 	// subcribe to symbol selection
 	if token := mqttClient.Subscribe(symbolSelectionTopic(), 0, symbolSelectionHandler); token.Wait() && token.Error() != nil {
@@ -287,19 +241,8 @@ func Start() {
 		os.Exit(1)
 	}()
 
-	DEBUG.Printf("register Slave %s on master %s", boardID, masterAddress)
-	var game Game
-	game.BoardID = boardID
-
-	encodedGame, err := json.Marshal(&game)
-	if err != nil {
-		panic(err)
-	}
-	gameURL = string(postJSON(masterAddress, "/registry", encodedGame))
-	if !strings.HasPrefix(gameURL, "http://") {
-		gameURL = "http://" + gameURL
-	}
-	DEBUG.Printf("Use gameURL %s", gameURL)
+	status.initialized = true
+	showGameState()
 
 	fmt.Println("Press Ctrl-C to stop")
 	for {
