@@ -1,16 +1,9 @@
 /*
- * Copyright (c) 2013 IBM Corp.
- *
- * All rights reserved. This program and the accompanying materials
- * are made available under the terms of the Eclipse Public License v1.0
- * which accompanies this distribution, and is available at
- * http://www.eclipse.org/legal/epl-v10.html
- *
- * Contributors:
- *    Seth Hoenig
- *    Allan Stockdill-Mander
- *    Mike Robertson
- */
+Rock, Paper, Scissor game slave
+
+Uses a MQTT device as a game console and plays against master (Http Rest-API)
+
+*/
 
 package main
 
@@ -61,64 +54,89 @@ func down(sym symbol) symbol {
 	return scissor
 }
 
-var currentSymbol symbol
-var encoderValue = 0
+var boardID string
+var mqttClient mqtt.Client
+var logger log.Logger
+var displayContent [4]string
 
-var f mqtt.MessageHandler = func(client mqtt.Client, msg mqtt.Message) {
-	fmt.Printf("TOPIC: %s\n", msg.Topic())
-	fmt.Printf("MSG: %s\n", msg.Payload())
+type gameStatus struct {
+	currentSymbol symbol
+	encoderValue  int
+	ownScore      int
+	opponentScore int
 }
 
-func topicPrefix(boardID string) string {
+var status gameStatus
+
+func updateDisplay() {
+	message := fmt.Sprintf("%s\n%s\n%s\n%s", displayContent[0], displayContent[1], displayContent[2], displayContent[3])
+	token := mqttClient.Publish(messageTopic(), 0, false, message)
+	token.Wait()
+}
+
+func showSymbol() {
+	displayContent[0] = fmt.Sprintf("%s", status.currentSymbol)
+	displayContent[1] = fmt.Sprintf("-----")
+	displayContent[2] = fmt.Sprintf("Own:      %d", status.ownScore)
+	displayContent[3] = fmt.Sprintf("Opponent: %d", status.opponentScore)
+	updateDisplay()
+}
+
+var f mqtt.MessageHandler = func(client mqtt.Client, msg mqtt.Message) {
+	log.Printf("TOPIC: %s\n", msg.Topic())
+	log.Printf("MSG: %s\n", msg.Payload())
+}
+
+func topicPrefix() string {
 	return fmt.Sprintf("tw/%s", boardID)
 }
 
-func playButtonTopic(boardID string) string {
-	return fmt.Sprintf("%s/button/1/status", topicPrefix(boardID))
+func playButtonTopic() string {
+	return fmt.Sprintf("%s/button/1/status", topicPrefix())
 }
 
-func showScoreButtonTopic(boardID string) string {
-	return fmt.Sprintf("%s/button/2/status", topicPrefix(boardID))
+func showScoreButtonTopic() string {
+	return fmt.Sprintf("%s/button/2/status", topicPrefix())
 }
 
-func symbolSelectionTopic(boardID string) string {
-	return fmt.Sprintf("%s/encoder/1/status", topicPrefix(boardID))
+func symbolSelectionTopic() string {
+	return fmt.Sprintf("%s/encoder/1/status", topicPrefix())
 }
 
-func displaySelectTopic(boardID string) string {
-	return fmt.Sprintf("%s/display/1/show", topicPrefix(boardID))
+func displaySelectTopic() string {
+	return fmt.Sprintf("%s/display/1/show", topicPrefix())
 }
 
-func messageTopic(boardID string) string {
-	return fmt.Sprintf("%s/display/1/message", topicPrefix(boardID))
+func messageTopic() string {
+	return fmt.Sprintf("%s/display/1/message", topicPrefix())
 }
 
-func symbolSelectionHandler(boardID string, client mqtt.Client, msg mqtt.Message) {
+func symbolSelectionHandler(client mqtt.Client, msg mqtt.Message) {
 	payload := string(msg.Payload())
 	i, err := strconv.Atoi(payload)
 	if err == nil {
-		if i > encoderValue {
-			currentSymbol = up(currentSymbol)
+		if i > status.encoderValue {
+			status.currentSymbol = up(status.currentSymbol)
 		}
-		if i < encoderValue {
-			currentSymbol = down(currentSymbol)
+		if i < status.encoderValue {
+			status.currentSymbol = down(status.currentSymbol)
 		}
-		encoderValue = i
-		fmt.Printf("Symbol=%s\n", currentSymbol)
-		token := client.Publish(messageTopic(boardID), 0, false, currentSymbol.String())
-		token.Wait()
+		status.encoderValue = i
+		log.Printf("Symbol=%s\n", status.currentSymbol)
+		showSymbol()
 
 	} else {
-		fmt.Printf("Err=%s Payload=%s\n", err, msg.Payload())
+		log.Printf("Err=%s Payload=%s\n", err, msg.Payload())
 	}
 }
 
-func playButtonHandler(boardID string, client mqtt.Client, msg mqtt.Message) {
+func playButtonHandler(client mqtt.Client, msg mqtt.Message) {
 	payload := string(msg.Payload())
 	if payload == "ON" {
-		fmt.Printf("PlayButton Pressed\n")
+		log.Printf("PlayButton Pressed\n")
 	} else {
-		fmt.Printf("PlayButton Released\n")
+		log.Printf("PlayButton Released\n")
+		// POST symbol to master
 	}
 }
 
@@ -129,10 +147,10 @@ func main() {
 	brokerHostAddressPtr := flag.String("brokerip", "192.168.201.99:1883", "Broker Address")
 	flag.Parse()
 
-	boardID := *boardIDPtr
+	boardID = *boardIDPtr
 	brokerAddress := fmt.Sprintf("tcp://%s", *brokerHostAddressPtr)
 
-	currentSymbol = rock
+	status.currentSymbol = rock
 
 	//mqtt.DEBUG = log.New(os.Stdout, "", 0)
 	mqtt.ERROR = log.New(os.Stdout, "", 0)
@@ -141,28 +159,22 @@ func main() {
 	opts.SetDefaultPublishHandler(f)
 	opts.SetPingTimeout(1 * time.Second)
 
-	c := mqtt.NewClient(opts)
-	if token := c.Connect(); token.Wait() && token.Error() != nil {
+	mqttClient = mqtt.NewClient(opts)
+	if token := mqttClient.Connect(); token.Wait() && token.Error() != nil {
 		panic(token.Error())
 	}
 
 	// select message display 4
-	token := c.Publish(displaySelectTopic(boardID), 0, false, "4")
+	token := mqttClient.Publish(displaySelectTopic(), 0, false, "4")
 	token.Wait()
 
 	// subcribe to symbol selection
-	symbolSelectionHandlerFn := func(client mqtt.Client, msg mqtt.Message) {
-		symbolSelectionHandler(boardID, client, msg)
-	}
-	if token := c.Subscribe(symbolSelectionTopic(boardID), 0, symbolSelectionHandlerFn); token.Wait() && token.Error() != nil {
+	if token := mqttClient.Subscribe(symbolSelectionTopic(), 0, symbolSelectionHandler); token.Wait() && token.Error() != nil {
 		fmt.Println(token.Error())
 		os.Exit(1)
 	}
 	// subcribe to play button
-	playButtonHandlerFn := func(client mqtt.Client, msg mqtt.Message) {
-		playButtonHandler(boardID, client, msg)
-	}
-	if token := c.Subscribe(playButtonTopic(boardID), 0, playButtonHandlerFn); token.Wait() && token.Error() != nil {
+	if token := mqttClient.Subscribe(playButtonTopic(), 0, playButtonHandler); token.Wait() && token.Error() != nil {
 		fmt.Println(token.Error())
 		os.Exit(1)
 	}
@@ -172,18 +184,18 @@ func main() {
 	signal.Notify(cleanUpChan, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		<-cleanUpChan
-		fmt.Println("cleaning up")
-		if token := c.Unsubscribe(symbolSelectionTopic(boardID)); token.Wait() && token.Error() != nil {
+		log.Println("cleaning up")
+		if token := mqttClient.Unsubscribe(symbolSelectionTopic()); token.Wait() && token.Error() != nil {
 			fmt.Println(token.Error())
 			os.Exit(1)
 		}
-		if token := c.Unsubscribe(playButtonTopic(boardID)); token.Wait() && token.Error() != nil {
+		if token := mqttClient.Unsubscribe(playButtonTopic()); token.Wait() && token.Error() != nil {
 			fmt.Println(token.Error())
 			os.Exit(1)
 		}
 
-		c.Disconnect(250)
-		fmt.Println("cleaned up")
+		mqttClient.Disconnect(250)
+		log.Println("cleaned up")
 		os.Exit(1)
 	}()
 
