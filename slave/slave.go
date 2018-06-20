@@ -8,6 +8,7 @@ Uses a MQTT device as a game console and plays against master (Http Rest-API)
 package slave
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"flag"
@@ -31,6 +32,7 @@ var gameURL string
 var mqttClient mqtt.Client
 var logger log.Logger
 var displayContent [4]string
+var simulationMode bool
 
 type gameStatus struct {
 	initialized     bool
@@ -67,9 +69,11 @@ func postJSON(baseURL string, url string, json []byte) []byte {
 
 func updateDisplay() {
 	message := fmt.Sprintf("%s\n%s\n%s\n%s", displayContent[0], displayContent[1], displayContent[2], displayContent[3])
-	DEBUG.Println(message)
-	token := mqttClient.Publish(messageTopic(), 0, false, message)
-	token.Wait()
+	fmt.Println(message)
+	if !simulationMode {
+		token := mqttClient.Publish(messageTopic(), 0, false, message)
+		token.Wait()
+	}
 }
 
 func showGameState() {
@@ -79,12 +83,42 @@ func showGameState() {
 		displayContent[2] = ""
 		displayContent[3] = ""
 	} else {
-		displayContent[0] = status.currentSymbol.String()
-		displayContent[1] = status.oppenentSymbol.String()
+		displayContent[0] = fmt.Sprintf("Own:      %s", status.currentSymbol.String())
+		displayContent[1] = fmt.Sprintf("Opponent: %s", status.oppenentSymbol.String())
 		displayContent[2] = fmt.Sprintf("Own:      %d", status.ownScore)
 		displayContent[3] = fmt.Sprintf("Opponent: %d", status.opponentScore)
 	}
 	updateDisplay()
+}
+
+func selectSymbol(turnRight bool) {
+	if turnRight {
+		status.currentSymbol = Up(status.currentSymbol)
+	} else {
+		status.currentSymbol = Down(status.currentSymbol)
+	}
+	DEBUG.Printf("Symbol=%s\n", status.currentSymbol)
+	showGameState()
+}
+
+func playGame() {
+	var slaveSymbol GameSymbol
+	slaveSymbol.Symbol = status.currentSymbol.String()
+	encodedSymbol, err := json.Marshal(&slaveSymbol)
+	if err != nil {
+		panic(err)
+	}
+	body := postJSON(gameURL, "", encodedSymbol)
+	var gameResult GameResult
+	err = json.Unmarshal(body, &gameResult)
+	if err != nil {
+		panic(err)
+	}
+	DEBUG.Printf("gameResult=%s", string(body))
+	status.ownScore = gameResult.SlaveScore
+	status.opponentScore = gameResult.MasterScore
+	status.oppenentSymbol = FromString(gameResult.GameHistory[len(gameResult.GameHistory)-1].MasterSymbol)
+	showGameState()
 }
 
 var f mqtt.MessageHandler = func(client mqtt.Client, msg mqtt.Message) {
@@ -122,14 +156,11 @@ func symbolSelectionHandler(client mqtt.Client, msg mqtt.Message) {
 	if err == nil {
 		if status.initialized {
 			if i > status.encoderValue {
-				status.currentSymbol = Up(status.currentSymbol)
+				selectSymbol(true)
 			}
 			if i < status.encoderValue {
-				status.currentSymbol = Down(status.currentSymbol)
+				selectSymbol(false)
 			}
-			status.encoderValue = i
-			DEBUG.Printf("Symbol=%s\n", status.currentSymbol)
-			showGameState()
 		}
 	} else {
 		log.Printf("Err=%s Payload=%s\n", err, msg.Payload())
@@ -144,23 +175,7 @@ func playButtonHandler(client mqtt.Client, msg mqtt.Message) {
 	} else if payload == "OFF" {
 		if status.playButtonState && status.initialized == true {
 			DEBUG.Printf("PlayButton Released\n")
-			var slaveSymbol GameSymbol
-			slaveSymbol.Symbol = status.currentSymbol.String()
-			encodedSymbol, err := json.Marshal(&slaveSymbol)
-			if err != nil {
-				panic(err)
-			}
-			body := postJSON(gameURL, "", encodedSymbol)
-			var gameResult GameResult
-			err = json.Unmarshal(body, &gameResult)
-			if err != nil {
-				panic(err)
-			}
-			DEBUG.Printf("gameResult=%s", string(body))
-			status.ownScore = gameResult.SlaveScore
-			status.opponentScore = gameResult.MasterScore
-			status.oppenentSymbol = FromString(gameResult.GameHistory[len(gameResult.GameHistory)-1].MasterSymbol)
-			showGameState()
+			playGame()
 		}
 		status.playButtonState = false
 	}
@@ -173,31 +188,34 @@ func Start() {
 	masterHostAddressPtr := flag.String("masterip", "192.168.201.99:8080", "Master Address")
 	brokerHostAddressPtr := flag.String("brokerip", "192.168.201.99:1883", "Broker Address")
 	verbosePtr := flag.Bool("v", false, "Enable logging output")
+	simPtr := flag.Bool("sim", false, "Use simulation mode (Ctrl-by-Keyboard)")
 	flag.Parse()
 
 	boardID = *boardIDPtr
 	brokerAddress := fmt.Sprintf("tcp://%s", *brokerHostAddressPtr)
 	masterAddress = fmt.Sprintf("http://%s", *masterHostAddressPtr)
+	simulationMode = *simPtr
 
 	if *verbosePtr == true {
 		DEBUG = log.New(os.Stdout, "[slave] ", 0)
 	}
-	//mqtt.DEBUG = log.New(os.Stdout, "[mqtt] ", 0)
-	mqtt.ERROR = log.New(os.Stdout, "[mqtt] ", 0)
-	opts := mqtt.NewClientOptions().AddBroker(brokerAddress).SetClientID("gotrivial")
-	opts.SetKeepAlive(2 * time.Second)
-	opts.SetDefaultPublishHandler(f)
-	opts.SetPingTimeout(1 * time.Second)
+	if !simulationMode {
+		//mqtt.DEBUG = log.New(os.Stdout, "[mqtt] ", 0)
+		mqtt.ERROR = log.New(os.Stdout, "[mqtt] ", 0)
+		opts := mqtt.NewClientOptions().AddBroker(brokerAddress).SetClientID("gotrivial")
+		opts.SetKeepAlive(2 * time.Second)
+		opts.SetDefaultPublishHandler(f)
+		opts.SetPingTimeout(1 * time.Second)
 
-	mqttClient = mqtt.NewClient(opts)
-	if token := mqttClient.Connect(); token.Wait() && token.Error() != nil {
-		panic(token.Error())
+		mqttClient = mqtt.NewClient(opts)
+		if token := mqttClient.Connect(); token.Wait() && token.Error() != nil {
+			panic(token.Error())
+		}
+
+		// select message display 4
+		token := mqttClient.Publish(displaySelectTopic(), 0, false, "4")
+		token.Wait()
 	}
-
-	// select message display 4
-	token := mqttClient.Publish(displaySelectTopic(), 0, false, "4")
-	token.Wait()
-
 	showGameState()
 
 	DEBUG.Printf("register Slave %s on master %s", boardID, masterAddress)
@@ -213,40 +231,58 @@ func Start() {
 		gameURL = "http://" + gameURL
 	}
 	DEBUG.Printf("Use gameURL %s", gameURL)
-
-	// subcribe to symbol selection
-	if token := mqttClient.Subscribe(symbolSelectionTopic(), 0, symbolSelectionHandler); token.Wait() && token.Error() != nil {
-		panic(token.Error())
-	}
-	// subcribe to play button
-	if token := mqttClient.Subscribe(playButtonTopic(), 0, playButtonHandler); token.Wait() && token.Error() != nil {
-		panic(token.Error())
-	}
-
-	// register cleanup
-	cleanUpChan := make(chan os.Signal)
-	signal.Notify(cleanUpChan, os.Interrupt, syscall.SIGTERM)
-	go func() {
-		<-cleanUpChan
-		DEBUG.Println("cleaning up")
-		if token := mqttClient.Unsubscribe(symbolSelectionTopic()); token.Wait() && token.Error() != nil {
-			panic(token.Error())
-		}
-		if token := mqttClient.Unsubscribe(playButtonTopic()); token.Wait() && token.Error() != nil {
-			panic(token.Error())
-		}
-
-		mqttClient.Disconnect(250)
-		DEBUG.Println("cleaned up")
-		os.Exit(1)
-	}()
-
 	status.initialized = true
 	showGameState()
 
-	fmt.Println("Press Ctrl-C to stop")
-	for {
-		time.Sleep(1000 * time.Second) // or runtime.Gosched() or similar per @misterbee
-	}
+	if simulationMode {
+		fmt.Println("Press Ctrl-C to stop")
+		for {
+			reader := bufio.NewReader(os.Stdin)
+			fmt.Print("Enter (<L>eft, <R>ight or <P>lay): ")
+			text, _ := reader.ReadString('\n')
+			text = strings.ToUpper(text)
+			DEBUG.Printf("Text=%s", text)
+			if strings.HasPrefix(text, "L") {
+				selectSymbol(false)
+			}
+			if strings.HasPrefix(text, "R") {
+				selectSymbol(true)
+			}
+			if strings.HasPrefix(text, "P") {
+				playGame()
+			}
+		}
+	} else {
+		// subcribe to symbol selection
+		if token := mqttClient.Subscribe(symbolSelectionTopic(), 0, symbolSelectionHandler); token.Wait() && token.Error() != nil {
+			panic(token.Error())
+		}
+		// subcribe to play button
+		if token := mqttClient.Subscribe(playButtonTopic(), 0, playButtonHandler); token.Wait() && token.Error() != nil {
+			panic(token.Error())
+		}
 
+		// register cleanup
+		cleanUpChan := make(chan os.Signal)
+		signal.Notify(cleanUpChan, os.Interrupt, syscall.SIGTERM)
+		go func() {
+			<-cleanUpChan
+			DEBUG.Println("cleaning up")
+			if token := mqttClient.Unsubscribe(symbolSelectionTopic()); token.Wait() && token.Error() != nil {
+				panic(token.Error())
+			}
+			if token := mqttClient.Unsubscribe(playButtonTopic()); token.Wait() && token.Error() != nil {
+				panic(token.Error())
+			}
+
+			mqttClient.Disconnect(250)
+			DEBUG.Println("cleaned up")
+			os.Exit(1)
+		}()
+
+		fmt.Println("Press Ctrl-C to stop")
+		for {
+			time.Sleep(1000 * time.Second) // or runtime.Gosched() or similar per @misterbee
+		}
+	}
 }
