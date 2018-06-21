@@ -28,6 +28,7 @@ import (
 
 var boardID string
 var masterAddress string
+var brokerAddress string
 var gameURL string
 var mqttClient mqtt.Client
 var logger log.Logger
@@ -45,7 +46,7 @@ type gameStatus struct {
 
 var status gameStatus
 
-func postJSON(baseURL string, url string, json []byte) http.Response {
+func postJSON(baseURL string, url string, json []byte) *http.Response {
 	req, err := http.NewRequest("POST", baseURL+url, bytes.NewBuffer(json))
 	if err != nil {
 		panic(err)
@@ -57,16 +58,16 @@ func postJSON(baseURL string, url string, json []byte) http.Response {
 	if err != nil {
 		panic(err)
 	}
-	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 && resp.StatusCode != 201 {
 		panic("Invalid POST response status " + resp.Status)
 	}
-	return *resp
+	return resp
 }
 
 func updateDisplay() {
 	message := fmt.Sprintf("%s\n%s\n%s\n%s", displayContent[0], displayContent[1], displayContent[2], displayContent[3])
+	fmt.Println("---------------")
 	fmt.Println(message)
 	if !simulationMode {
 		token := mqttClient.Publish(messageTopic(), 0, false, message)
@@ -108,7 +109,9 @@ func playGame() {
 	}
 	resp := postJSON(gameURL, "", encodedSymbol)
 	body, _ := ioutil.ReadAll(resp.Body)
-	var gameResult PostResult
+	defer resp.Body.Close()
+	DEBUG.Printf("Json=%s", string(body))
+	var gameResult PlayResult
 	err = json.Unmarshal(body, &gameResult)
 	if err != nil {
 		panic(err)
@@ -187,13 +190,26 @@ func Start() {
 	flag.Parse()
 
 	boardID = *boardIDPtr
-	brokerAddress := fmt.Sprintf("tcp://%s", *brokerHostAddressPtr)
+	brokerAddress = fmt.Sprintf("tcp://%s", *brokerHostAddressPtr)
 	masterAddress = fmt.Sprintf("http://%s", *masterHostAddressPtr)
 	simulationMode = *simPtr
 
 	if *verbosePtr == true {
 		DEBUG = log.New(os.Stdout, "[slave] ", 0)
 	}
+	for {
+		play()
+	}
+}
+
+func play() error {
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Println("recovered in play", r)
+			cleanup()
+		}
+	}()
+
 	if !simulationMode {
 		//mqtt.DEBUG = log.New(os.Stdout, "[mqtt] ", 0)
 		mqtt.ERROR = log.New(os.Stdout, "[mqtt] ", 0)
@@ -223,6 +239,7 @@ func Start() {
 	}
 	resp := postJSON(masterAddress, "/registry", encodedBoard)
 	gameURL = string(resp.Header.Get("content-location"))
+	defer resp.Body.Close()
 
 	if !strings.HasPrefix(gameURL, "http://") {
 		gameURL = "http://" + gameURL
@@ -264,16 +281,7 @@ func Start() {
 		signal.Notify(cleanUpChan, os.Interrupt, syscall.SIGTERM)
 		go func() {
 			<-cleanUpChan
-			DEBUG.Println("cleaning up")
-			if token := mqttClient.Unsubscribe(symbolSelectionTopic()); token.Wait() && token.Error() != nil {
-				panic(token.Error())
-			}
-			if token := mqttClient.Unsubscribe(playButtonTopic()); token.Wait() && token.Error() != nil {
-				panic(token.Error())
-			}
-
-			mqttClient.Disconnect(250)
-			DEBUG.Println("cleaned up")
+			cleanup()
 			os.Exit(1)
 		}()
 
@@ -282,4 +290,17 @@ func Start() {
 			time.Sleep(1000 * time.Second) // or runtime.Gosched() or similar per @misterbee
 		}
 	}
+}
+
+func cleanup() {
+	DEBUG.Println("cleaning up")
+	if token := mqttClient.Unsubscribe(symbolSelectionTopic()); token.Wait() && token.Error() != nil {
+		panic(token.Error())
+	}
+	if token := mqttClient.Unsubscribe(playButtonTopic()); token.Wait() && token.Error() != nil {
+		panic(token.Error())
+	}
+
+	mqttClient.Disconnect(250)
+	DEBUG.Println("cleaned up")
 }

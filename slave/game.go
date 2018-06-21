@@ -15,7 +15,7 @@ type GameResult struct {
 	GameHistory []GameHistoryEntry
 }
 
-type PostResult struct {
+type PlayResult struct {
 	MasterScore  int
 	SlaveScore   int
 	MasterSymbol string
