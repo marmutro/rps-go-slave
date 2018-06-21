@@ -35,18 +35,17 @@ var displayContent [4]string
 var simulationMode bool
 
 type gameStatus struct {
-	initialized     bool
-	encoderValue    int
-	playButtonState bool
-	currentSymbol   Symbol
-	oppenentSymbol  Symbol
-	ownScore        int
-	opponentScore   int
+	initialized    bool
+	encoderValue   int
+	currentSymbol  Symbol
+	oppenentSymbol Symbol
+	ownScore       int
+	opponentScore  int
 }
 
 var status gameStatus
 
-func postJSON(baseURL string, url string, json []byte) []byte {
+func postJSON(baseURL string, url string, json []byte) http.Response {
 	req, err := http.NewRequest("POST", baseURL+url, bytes.NewBuffer(json))
 	if err != nil {
 		panic(err)
@@ -63,8 +62,7 @@ func postJSON(baseURL string, url string, json []byte) []byte {
 	if resp.StatusCode != 200 && resp.StatusCode != 201 {
 		panic("Invalid POST response status " + resp.Status)
 	}
-	body, _ := ioutil.ReadAll(resp.Body)
-	return body
+	return *resp
 }
 
 func updateDisplay() {
@@ -108,8 +106,9 @@ func playGame() {
 	if err != nil {
 		panic(err)
 	}
-	body := postJSON(gameURL, "", encodedSymbol)
-	var gameResult GameResult
+	resp := postJSON(gameURL, "", encodedSymbol)
+	body, _ := ioutil.ReadAll(resp.Body)
+	var gameResult PostResult
 	err = json.Unmarshal(body, &gameResult)
 	if err != nil {
 		panic(err)
@@ -117,7 +116,7 @@ func playGame() {
 	DEBUG.Printf("gameResult=%s", string(body))
 	status.ownScore = gameResult.SlaveScore
 	status.opponentScore = gameResult.MasterScore
-	status.oppenentSymbol = FromString(gameResult.GameHistory[len(gameResult.GameHistory)-1].MasterSymbol)
+	status.oppenentSymbol = FromString(gameResult.MasterSymbol)
 	showGameState()
 }
 
@@ -169,15 +168,11 @@ func symbolSelectionHandler(client mqtt.Client, msg mqtt.Message) {
 
 func playButtonHandler(client mqtt.Client, msg mqtt.Message) {
 	payload := string(msg.Payload())
-	if payload == "ON" {
-		DEBUG.Printf("PlayButton Pressed\n")
-		status.playButtonState = true
-	} else if payload == "OFF" {
-		if status.playButtonState && status.initialized == true {
+	if payload == "CLICKED" {
+		if status.initialized == true {
 			DEBUG.Printf("PlayButton Released\n")
 			playGame()
 		}
-		status.playButtonState = false
 	}
 }
 
@@ -219,14 +214,16 @@ func Start() {
 	showGameState()
 
 	DEBUG.Printf("register Slave %s on master %s", boardID, masterAddress)
-	var game Game
-	game.BoardID = boardID
+	var board Board
+	board.BoardID = boardID
 
-	encodedGame, err := json.Marshal(&game)
+	encodedBoard, err := json.Marshal(&board)
 	if err != nil {
 		panic(err)
 	}
-	gameURL = string(postJSON(masterAddress, "/registry", encodedGame))
+	resp := postJSON(masterAddress, "/registry", encodedBoard)
+	gameURL = string(resp.Header.Get("content-location"))
+
 	if !strings.HasPrefix(gameURL, "http://") {
 		gameURL = "http://" + gameURL
 	}
