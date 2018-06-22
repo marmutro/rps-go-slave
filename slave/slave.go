@@ -36,6 +36,7 @@ var simulationMode bool
 
 type gameStatus struct {
 	initialized    bool
+	initChan       chan bool
 	encoderValue   int
 	currentSymbol  Symbol
 	oppenentSymbol Symbol
@@ -135,6 +136,10 @@ func playButtonTopic() string {
 	return fmt.Sprintf("%s/button/1/status", topicPrefix())
 }
 
+func statusTopic() string {
+	return fmt.Sprintf("%s//status", topicPrefix())
+}
+
 func showScoreButtonTopic() string {
 	return fmt.Sprintf("%s/button/2/status", topicPrefix())
 }
@@ -178,6 +183,20 @@ func playButtonHandler(client mqtt.Client, msg mqtt.Message) {
 	}
 }
 
+func statusHandler(client mqtt.Client, msg mqtt.Message) {
+	payload := string(msg.Payload())
+	if payload == "online" {
+		DEBUG.Printf("Online received\n")
+		if status.initialized == true {
+			status.initialized = false
+			os.Exit(0)
+		} else {
+			status.initialized = true
+			status.initChan <- true
+		}
+	}
+}
+
 // Start the slave
 func Start(boardID_, masterHostAddress, brokerHostAddress string, verbose, sim bool) {
 
@@ -189,23 +208,60 @@ func Start(boardID_, masterHostAddress, brokerHostAddress string, verbose, sim b
 	if verbose == true {
 		DEBUG = log.New(os.Stdout, "[slave] ", 0)
 	}
-	for {
-		play()
+	status.initChan = make(chan bool)
+	go recoverer(func() { play() })
+
+	fmt.Println("Press Ctrl-C to stop")
+	if simulationMode {
+		for {
+			reader := bufio.NewReader(os.Stdin)
+			fmt.Print("Enter (<L>eft, <R>ight or <P>lay): ")
+			text, _ := reader.ReadString('\n')
+			text = strings.ToUpper(text)
+			DEBUG.Printf("Text=%s", text)
+			if strings.HasPrefix(text, "L") {
+				selectSymbol(false)
+			}
+			if strings.HasPrefix(text, "R") {
+				selectSymbol(true)
+			}
+			if strings.HasPrefix(text, "P") {
+				playGame()
+			}
+		}
+
+	} else {
+		// register cleanup
+		cleanUpChan := make(chan os.Signal)
+		signal.Notify(cleanUpChan, os.Interrupt, syscall.SIGTERM)
+		go func() {
+			<-cleanUpChan
+			cleanup()
+			os.Exit(1)
+		}()
+
+		for {
+			time.Sleep(1000 * time.Second) // or runtime.Gosched() or similar per @misterbee
+		}
 	}
 }
 
-func play() error {
+func recoverer(f func()) {
 	defer func() {
 		if r := recover(); r != nil {
 			fmt.Println("recovered in play", r)
 			cleanup()
 		}
 	}()
+	f()
+}
+
+func play() {
 
 	if !simulationMode {
 		//mqtt.DEBUG = log.New(os.Stdout, "[mqtt] ", 0)
 		mqtt.ERROR = log.New(os.Stdout, "[mqtt] ", 0)
-		opts := mqtt.NewClientOptions().AddBroker(brokerAddress).SetClientID("gotrivial")
+		opts := mqtt.NewClientOptions().AddBroker(brokerAddress)
 		opts.SetKeepAlive(2 * time.Second)
 		opts.SetDefaultPublishHandler(f)
 		opts.SetPingTimeout(1 * time.Second)
@@ -237,28 +293,8 @@ func play() error {
 		gameURL = "http://" + gameURL
 	}
 	DEBUG.Printf("Use gameURL %s", gameURL)
-	status.initialized = true
-	showGameState()
 
-	if simulationMode {
-		fmt.Println("Press Ctrl-C to stop")
-		for {
-			reader := bufio.NewReader(os.Stdin)
-			fmt.Print("Enter (<L>eft, <R>ight or <P>lay): ")
-			text, _ := reader.ReadString('\n')
-			text = strings.ToUpper(text)
-			DEBUG.Printf("Text=%s", text)
-			if strings.HasPrefix(text, "L") {
-				selectSymbol(false)
-			}
-			if strings.HasPrefix(text, "R") {
-				selectSymbol(true)
-			}
-			if strings.HasPrefix(text, "P") {
-				playGame()
-			}
-		}
-	} else {
+	if !simulationMode {
 		// subcribe to symbol selection
 		if token := mqttClient.Subscribe(symbolSelectionTopic(), 0, symbolSelectionHandler); token.Wait() && token.Error() != nil {
 			panic(token.Error())
@@ -267,21 +303,13 @@ func play() error {
 		if token := mqttClient.Subscribe(playButtonTopic(), 0, playButtonHandler); token.Wait() && token.Error() != nil {
 			panic(token.Error())
 		}
-
-		// register cleanup
-		cleanUpChan := make(chan os.Signal)
-		signal.Notify(cleanUpChan, os.Interrupt, syscall.SIGTERM)
-		go func() {
-			<-cleanUpChan
-			cleanup()
-			os.Exit(1)
-		}()
-
-		fmt.Println("Press Ctrl-C to stop")
-		for {
-			time.Sleep(1000 * time.Second) // or runtime.Gosched() or similar per @misterbee
+		// subcribe to play button
+		if token := mqttClient.Subscribe(statusTopic(), 0, statusHandler); token.Wait() && token.Error() != nil {
+			panic(token.Error())
 		}
+		<-status.initChan
 	}
+	showGameState()
 }
 
 func cleanup() {
@@ -290,6 +318,9 @@ func cleanup() {
 		panic(token.Error())
 	}
 	if token := mqttClient.Unsubscribe(playButtonTopic()); token.Wait() && token.Error() != nil {
+		panic(token.Error())
+	}
+	if token := mqttClient.Unsubscribe(statusTopic()); token.Wait() && token.Error() != nil {
 		panic(token.Error())
 	}
 
