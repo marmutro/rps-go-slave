@@ -11,7 +11,6 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
-	"flag"
 	"fmt"
 	"io/ioutil"
 	"log"
@@ -180,21 +179,14 @@ func playButtonHandler(client mqtt.Client, msg mqtt.Message) {
 }
 
 // Start the slave
-func Start() {
+func Start(boardID_, masterHostAddress, brokerHostAddress string, verbose, sim bool) {
 
-	boardIDPtr := flag.String("id", "b03", "Board-ID")
-	masterHostAddressPtr := flag.String("masterip", "192.168.201.99:8080", "Master Address")
-	brokerHostAddressPtr := flag.String("brokerip", "192.168.201.99:1883", "Broker Address")
-	verbosePtr := flag.Bool("v", false, "Enable logging output")
-	simPtr := flag.Bool("sim", false, "Use simulation mode (Ctrl-by-Keyboard)")
-	flag.Parse()
+	boardID = boardID_
+	brokerAddress = fmt.Sprintf("tcp://%s", brokerHostAddress)
+	masterAddress = fmt.Sprintf("http://%s", masterHostAddress)
+	simulationMode = sim
 
-	boardID = *boardIDPtr
-	brokerAddress = fmt.Sprintf("tcp://%s", *brokerHostAddressPtr)
-	masterAddress = fmt.Sprintf("http://%s", *masterHostAddressPtr)
-	simulationMode = *simPtr
-
-	if *verbosePtr == true {
+	if verbose == true {
 		DEBUG = log.New(os.Stdout, "[slave] ", 0)
 	}
 	for {
