@@ -100,6 +100,16 @@ func selectSymbol(turnRight bool) {
 	showGameState()
 }
 
+func flashLED(color string) {
+	if !simulationMode {
+		token := mqttClient.Publish(ledTopic(), 0, false, color)
+		token.Wait()
+		time.Sleep(1 * time.Second)
+		token = mqttClient.Publish(ledTopic(), 0, false, "000000")
+		token.Wait()
+	}
+}
+
 func playGame() {
 	var slaveSymbol GameSymbol
 	slaveSymbol.Symbol = status.currentSymbol.String()
@@ -117,6 +127,13 @@ func playGame() {
 		panic(err)
 	}
 	DEBUG.Printf("gameResult=%s", string(body))
+	if status.ownScore < gameResult.SlaveScore {
+		go flashLED("000500")
+	}
+	if status.opponentScore < gameResult.MasterScore {
+
+		go flashLED("050000")
+	}
 	status.ownScore = gameResult.SlaveScore
 	status.opponentScore = gameResult.MasterScore
 	status.oppenentSymbol = FromString(gameResult.MasterSymbol)
@@ -154,6 +171,10 @@ func displaySelectTopic() string {
 
 func messageTopic() string {
 	return fmt.Sprintf("%s/display/1/message", topicPrefix())
+}
+
+func ledTopic() string {
+	return fmt.Sprintf("%s/led/1/set", topicPrefix())
 }
 
 func symbolSelectionHandler(client mqtt.Client, msg mqtt.Message) {
@@ -213,9 +234,11 @@ func Start(boardID_, masterHostAddress, brokerHostAddress string, verbose, sim b
 
 	fmt.Println("Press Ctrl-C to stop")
 	if simulationMode {
+		status.initialized = true
+		showGameState()
 		for {
-			reader := bufio.NewReader(os.Stdin)
 			fmt.Print("Enter (<L>eft, <R>ight or <P>lay): ")
+			reader := bufio.NewReader(os.Stdin)
 			text, _ := reader.ReadString('\n')
 			text = strings.ToUpper(text)
 			DEBUG.Printf("Text=%s", text)
@@ -274,6 +297,9 @@ func play() {
 		// select message display 4
 		token := mqttClient.Publish(displaySelectTopic(), 0, false, "4")
 		token.Wait()
+
+		go flashLED("000000")
+
 	}
 	showGameState()
 
